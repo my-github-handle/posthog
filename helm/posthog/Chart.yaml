@@ -1,0 +1,16 @@
+apiVersion: v2
+name: posthog
+description: Self-hosted PostHog on GKE — component-by-component (no Bitnami sub-charts).
+type: application
+version: 0.1.0
+appVersion: "1.43.0"
+home: https://posthog.com
+sources:
+  - https://github.com/PostHog/posthog
+maintainers:
+  - name: c3-platform-telemetry
+dependencies:
+  - name: altinity-clickhouse-operator
+    version: "0.24.0"
+    repository: "https://docs.altinity.com/clickhouse-operator/"
+    condition: altinity-clickhouse-operator.enabled

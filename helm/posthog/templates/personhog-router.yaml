@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "posthog.fullname" . }}-personhog-router
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: { app: {{ include "posthog.fullname" . }}-personhog-router }
+  ports:
+    - { name: grpc, port: 50052, targetPort: 50052, protocol: TCP }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "posthog.fullname" . }}-personhog-router
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.personhogRouter.replicas }}
+  selector: { matchLabels: { app: {{ include "posthog.fullname" . }}-personhog-router } }
+  template:
+    metadata: { labels: { app: {{ include "posthog.fullname" . }}-personhog-router } }
+    spec:
+      containers:
+        - name: personhog-router
+          image: {{ .Values.images.personhogRouter | quote }}
+          env:
+            - name: GRPC_ADDRESS
+              value: "0.0.0.0:50052"
+            - name: REPLICA_URL
+              value: {{ printf "http://%s-personhog-replica:50051" (include "posthog.fullname" .) | quote }}
+            - name: BACKEND_TIMEOUT_MS
+              value: "5000"
+            - name: RUST_LOG
+              value: "info"
+            - name: METRICS_PORT
+              value: "9101"
+          ports: [{ containerPort: 50052 }]
+          resources:
+            requests:
+              cpu:    {{ (index .Values.defaultResources .Values.personhogRouter.resourcesTier).requests.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.personhogRouter.resourcesTier).requests.memory | quote }}
+            limits:
+              cpu:    {{ (index .Values.defaultResources .Values.personhogRouter.resourcesTier).limits.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.personhogRouter.resourcesTier).limits.memory | quote }}

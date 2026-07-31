@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "posthog.fullname" . }}-pg-bootstrap
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: psql
+          image: postgres:15-alpine
+          env:
+            - name: PGHOST
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-endpoint } }
+            - name: PGPORT
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-port } }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-username } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-password } }
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              psql -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname='{{ .Values.postgres.database }}'" | grep -q 1 \
+                || psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"{{ .Values.postgres.database }}\""
+              echo "DB '{{ .Values.postgres.database }}' ready."

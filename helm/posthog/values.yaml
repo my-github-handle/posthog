@@ -1,0 +1,176 @@
+# Hostname + TLS
+hostname: "cloudify-posthog.c3iot.io"
+tlsSecretName: "tls-c3iotio"         # created by tls-externalsecret.yaml (Vault-synced)
+
+# TLS cert source (Vault → k8s Secret via External Secrets Operator)
+tls:
+  vaultEnabled: true                 # set false to use a pre-existing Secret of name {{ tlsSecretName }}
+  vaultStoreName: "vault-approle"    # ClusterSecretStore name (shared with gcs-hmac-externalsecret.yaml)
+  vaultPath: "secret/data/global/tls-c3iotio"  # KV v2 path; fields: crt, key
+
+# Cloud Armor policy name (must already exist in the GCP project)
+cloudArmorPolicy: "cloudify-posthog-armor"
+
+# Shared deps (reused from existing c3-opsadmin infra)
+kafka:
+  hosts: "c3aiops-c3t-kafka-c3-opsadmin:9092"
+  topicPrefix: "posthog_"
+
+postgres:
+  adminSecretName: "gkestageops1-c3-c3-k8spg-cs-005-admin-secret"
+  # Keys inside that Secret: postgres-db-endpoint, postgres-db-port,
+  # postgres-admin-username, postgres-admin-password
+  database: "posthog"
+
+# GCS (HMAC creds synced from Vault via ExternalSecret — see templates/gcs-hmac-externalsecret.yaml)
+gcs:
+  endpoint: "https://storage.googleapis.com"
+  bucket: "cloudify-qa"
+  sessionRecordingFolder: "posthog/session-recordings"
+  # ExternalSecret config — HMAC lives in Vault, synced into K8s Secret named below
+  hmacSecretName: "posthog-gcs-hmac"
+  vaultStoreName: "vault-approle"
+  vaultPath: "secret/data/gkestageops1/posthog-gcs-hmac"
+
+# ClickHouse
+clickhouse:
+  image: "clickhouse/clickhouse-server:26.3.9.8"
+  storageClass: "c3-ssd"
+  storageSize: "100Gi"
+  resources:
+    requests: { cpu: "1", memory: "4Gi" }
+    limits:   { cpu: "2", memory: "8Gi" }
+
+# Redis (auth — for web/worker/capture)
+redis:
+  image: "redis:7.2-alpine"
+  storageClass: "c3-default"
+  storageSize: "5Gi"
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "500m", memory: "1Gi" }
+
+# Redis CDP (no auth — for plugin server logs/traces)
+redisCdp:
+  image: "redis:7-alpine"
+  storageClass: "c3-default"
+  storageSize: "2Gi"
+  resources:
+    requests: { cpu: "50m",  memory: "128Mi" }
+    limits:   { cpu: "200m", memory: "512Mi" }
+
+# PostHog app — 4 deployments, 3 images (selfhog #8)
+posthog:
+  webImage: "posthog/posthog:latest"
+  captureImage: "ghcr.io/posthog/posthog/capture:master"
+  workerImage: "posthog/posthog:latest"     # same base as web; different command
+  pluginServerImage: "posthog/posthog-node:latest"
+
+# --- Images for every hobby-parity service (one map, one source of truth) ---
+# Templates added in H2–H4 will migrate from posthog.*Image to this map.
+images:
+  # Django (web + worker + migrations + asyncmigrationscheck)
+  web:           "posthog/posthog:latest"
+  # Rust services - all share the same registry
+  capture:              "ghcr.io/posthog/posthog/capture:master"
+  replayCapture:        "ghcr.io/posthog/posthog/capture:master"
+  propertyDefsRs:       "ghcr.io/posthog/posthog/property-defs-rs:master"
+  personhogReplica:     "ghcr.io/posthog/posthog/personhog-replica:master"
+  personhogRouter:      "ghcr.io/posthog/posthog/personhog-router:master"
+  hypercacheServer:     "ghcr.io/posthog/posthog/hypercache-server:master"
+  cymbal:               "ghcr.io/posthog/posthog/cymbal:master"
+  # Rust feature-flags service serves /flags and /decide — required by browser SDK
+  featureFlags:         "ghcr.io/posthog/posthog/feature-flags:master"
+  # Node plugin image — one image, many modes via PLUGIN_SERVER_MODE
+  pluginServerNode:     "posthog/posthog-node:latest"
+  # Kafka init (redpanda rpk tool)
+  kafkaInit:            "docker.redpanda.com/redpandadata/redpanda:v25.1.9"
+  # postgres tool for bootstrap Jobs
+  pgBootstrap:          "postgres:15-alpine"
+
+# --- Kafka topics — must be prefixed with .Values.kafka.topicPrefix in templates ---
+# The chart provides a helper `posthog.kafkaTopic` that prepends the prefix automatically.
+kafkaTopics:
+  eventsIngestion:            "events_plugin_ingestion"
+  sessionRecordingSnapshots:  "session_recording_snapshot_item_events"
+  clickhouseEventsJson:       "clickhouse_events_json"
+  # List used by kafka-init to create all required topics at install time
+  createOnInstall:
+    - "clickhouse_events_json"
+    # Add more here if other Rust services require pre-created topics
+
+# --- kafka-init Job (runs before Rust services start) ---
+kafkaInit:
+  enabled: true
+  # Uses images.kafkaInit above. Container runs rpk to create topics.
+  timeoutSeconds: 120
+  resources:
+    requests: { cpu: "50m",  memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
+# --- Default resources for the new services (override per-service if needed) ---
+defaultResources:
+  tiny:   { requests: { cpu: "50m",  memory: "128Mi" }, limits: { cpu: "300m", memory: "512Mi" } }
+  small:  { requests: { cpu: "100m", memory: "256Mi" }, limits: { cpu: "500m", memory: "1Gi" } }
+  medium: { requests: { cpu: "200m", memory: "512Mi" }, limits: { cpu: "1",    memory: "2Gi" } }
+  large:  { requests: { cpu: "500m", memory: "1Gi" },   limits: { cpu: "1",    memory: "2Gi" } }
+
+# Individual services (each referenced as needed in templates)
+replayCapture:        { replicas: 1, resourcesTier: "small"  }
+propertyDefsRs:       { replicas: 1, resourcesTier: "tiny"   }
+personhogReplica:     { replicas: 1, resourcesTier: "small"  }
+personhogRouter:      { replicas: 1, resourcesTier: "tiny"   }
+hypercacheServer:     { replicas: 1, resourcesTier: "small"  }
+cymbal:               { replicas: 1, resourcesTier: "small"  }
+featureFlags:         { replicas: 1, resourcesTier: "small"  }
+ingestionGeneral:        { replicas: 1, resourcesTier: "medium" }
+ingestionSessionReplay:  { replicas: 1, resourcesTier: "medium" }
+recordingApi:            { replicas: 1, resourcesTier: "small"  }
+ingestionErrorTracking:  { replicas: 1, resourcesTier: "tiny"   }
+ingestionLogs:           { replicas: 1, resourcesTier: "tiny"   }
+ingestionTraces:         { replicas: 1, resourcesTier: "tiny"   }
+djangoMigrate:        { resourcesTier: "medium" }
+asyncMigrationsCheck: { resourcesTier: "small" }
+
+# --- MaxMind geo DB (required by cymbal) ---
+# Simplest for now: an init-container downloads a publicly-hosted copy into an emptyDir.
+maxmindDb:
+  downloadUrl: "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb"
+  # If this URL fails in the air-gapped network, switch to false and cymbal/feature-flags
+  # fall back to no-geo (degraded but functional).
+  enabled: true
+
+web:
+  replicas: 1
+  resources:
+    # No limits: web pod is a Python worker pool whose working set is hard to bound;
+    # CPU limit throttles gunicorn, memory limit triggers OOMKill during request spikes.
+    requests: { cpu: "500m", memory: "4Gi" }
+
+capture:
+  replicas: 1
+  resources:
+    requests: { cpu: "200m", memory: "128Mi" }
+    limits:   { cpu: "1",    memory: "256Mi" }
+
+worker:
+  replicas: 1
+  resources:
+    requests: { cpu: "500m", memory: "4Gi" }
+    limits:   { cpu: "1" }
+
+pluginServer:
+  replicas: 1
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits:   { cpu: "1",    memory: "2Gi" }
+
+# Generated Secret key values (pass via --set-string at install time)
+secrets:
+  djangoSecretKey: ""                # openssl rand -base64 32
+  encryptionSaltKeys: ""             # openssl rand -hex 16 (MUST be exactly 32 raw chars — selfhog #4)
+
+# Altinity ClickHouse operator (sub-chart). Cluster-wide, installs CRDs + kube-system deployment.
+# Set enabled=false if the operator is already installed cluster-wide by someone else.
+altinity-clickhouse-operator:
+  enabled: true

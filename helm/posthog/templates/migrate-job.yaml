@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "posthog.fullname" . }}-migrate
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: {{ .Values.images.web | quote }}
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              echo "=== django migrations ==="
+              python manage.py migrate
+              echo "=== clickhouse migrations ==="
+              python manage.py migrate_clickhouse
+              echo "=== async migrations (complete-noop on fresh install) ==="
+              python manage.py run_async_migrations --complete-noop
+              echo "=== done ==="
+          envFrom:
+            - secretRef:
+                name: {{ include "posthog.fullname" . }}-app-secrets
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.adminSecretName | quote }}
+                  key: postgres-admin-username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.adminSecretName | quote }}
+                  key: postgres-admin-password
+            - name: POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.adminSecretName | quote }}
+                  key: postgres-db-endpoint
+            - name: POSTGRES_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.adminSecretName | quote }}
+                  key: postgres-db-port
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+            - name: PERSONS_DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+          resources:
+            requests:
+              cpu:    {{ (index .Values.defaultResources .Values.djangoMigrate.resourcesTier).requests.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.djangoMigrate.resourcesTier).requests.memory | quote }}
+            limits:
+              cpu:    {{ (index .Values.defaultResources .Values.djangoMigrate.resourcesTier).limits.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.djangoMigrate.resourcesTier).limits.memory | quote }}

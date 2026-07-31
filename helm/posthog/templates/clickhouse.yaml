@@ -1,0 +1,90 @@
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: {{ include "posthog.fullname" . }}-clickhouse
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  configuration:
+    zookeeper:
+      nodes:
+        - host: {{ printf "keeper-%s-clickhouse-keeper" (include "posthog.fullname" .) | quote }}
+          port: 2181
+    files:
+      config.d/macros.xml: |
+        <clickhouse>
+          <macros>
+            <hostClusterType>online</hostClusterType>
+            <hostClusterRole>data</hostClusterRole>
+          </macros>
+        </clickhouse>
+      config.d/named_collections.xml: |
+        <clickhouse>
+          <named_collections>
+            <msk_cluster>
+              <kafka_broker_list>{{ .Values.kafka.hosts }}</kafka_broker_list>
+              <kafka_security_protocol>PLAINTEXT</kafka_security_protocol>
+            </msk_cluster>
+            <warpstream_ingestion>
+              <kafka_broker_list>{{ .Values.kafka.hosts }}</kafka_broker_list>
+              <kafka_security_protocol>PLAINTEXT</kafka_security_protocol>
+            </warpstream_ingestion>
+            <warpstream_calculated_events>
+              <kafka_broker_list>{{ .Values.kafka.hosts }}</kafka_broker_list>
+              <kafka_security_protocol>PLAINTEXT</kafka_security_protocol>
+            </warpstream_calculated_events>
+            <warpstream_replay>
+              <kafka_broker_list>{{ .Values.kafka.hosts }}</kafka_broker_list>
+              <kafka_security_protocol>PLAINTEXT</kafka_security_protocol>
+            </warpstream_replay>
+          </named_collections>
+        </clickhouse>
+      config.d/crash_log.xml: |
+        <clickhouse>
+          <crash_log>
+            <database>system</database>
+            <table>crash_log</table>
+            <partition_by />
+            <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+            <max_size_rows>1024</max_size_rows>
+            <reserved_size_rows>1024</reserved_size_rows>
+            <buffer_size_rows_flush_threshold>512</buffer_size_rows_flush_threshold>
+            <flush_on_crash>true</flush_on_crash>
+          </crash_log>
+        </clickhouse>
+    users:
+      default/password: ""
+      default/networks/ip: "0.0.0.0/0"
+      default/access_management: "1"
+      default/named_collection_control: "1"
+    clusters:
+      - name: "posthog"
+        layout:
+          shardsCount: 1
+          replicasCount: 1
+  defaults:
+    templates:
+      podTemplate: posthog-ch-pod
+      dataVolumeClaimTemplate: data
+  templates:
+    podTemplates:
+      - name: posthog-ch-pod
+        spec:
+          containers:
+            - name: clickhouse
+              image: {{ .Values.clickhouse.image | quote }}
+              resources:
+                requests:
+                  cpu: {{ .Values.clickhouse.resources.requests.cpu | quote }}
+                  memory: {{ .Values.clickhouse.resources.requests.memory | quote }}
+                limits:
+                  cpu: {{ .Values.clickhouse.resources.limits.cpu | quote }}
+                  memory: {{ .Values.clickhouse.resources.limits.memory | quote }}
+    volumeClaimTemplates:
+      - name: data
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: {{ .Values.clickhouse.storageClass | quote }}
+          resources:
+            requests:
+              storage: {{ .Values.clickhouse.storageSize | quote }}

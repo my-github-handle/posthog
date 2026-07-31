@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "posthog.fullname" . }}-hypercache-server
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+  annotations:
+    cloud.google.com/backend-config: '{"default": "{{ include "posthog.fullname" . }}-hypercache-server-bc"}'
+spec:
+  # NodePort required: GKE Ingress backs /array and /surveys with this Service (see templates/ingress.yaml)
+  type: NodePort
+  selector: { app: {{ include "posthog.fullname" . }}-hypercache-server }
+  ports:
+    - { name: http, port: 3002, targetPort: 3002 }
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ include "posthog.fullname" . }}-hypercache-server-bc
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  securityPolicy:
+    name: {{ .Values.cloudArmorPolicy | quote }}
+  healthCheck:
+    type: HTTP
+    requestPath: /_readiness
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "posthog.fullname" . }}-hypercache-server
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.hypercacheServer.replicas }}
+  selector: { matchLabels: { app: {{ include "posthog.fullname" . }}-hypercache-server } }
+  template:
+    metadata: { labels: { app: {{ include "posthog.fullname" . }}-hypercache-server } }
+    spec:
+      containers:
+        - name: hypercache-server
+          image: {{ .Values.images.hypercacheServer | quote }}
+          env:
+            - name: REDIS_URL
+              value: {{ printf "redis://%s-redis:6379/" (include "posthog.fullname" .) | quote }}
+            - name: ADDRESS
+              value: "0.0.0.0:3002"
+            - name: RUST_LOG
+              value: "info"
+          ports: [{ containerPort: 3002 }]
+          resources:
+            requests:
+              cpu:    {{ (index .Values.defaultResources .Values.hypercacheServer.resourcesTier).requests.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.hypercacheServer.resourcesTier).requests.memory | quote }}
+            limits:
+              cpu:    {{ (index .Values.defaultResources .Values.hypercacheServer.resourcesTier).limits.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.hypercacheServer.resourcesTier).limits.memory | quote }}
+          readinessProbe:
+            httpGet: { path: /_readiness, port: 3002 }
+            initialDelaySeconds: 10
+            periodSeconds: 10

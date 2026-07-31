@@ -1,0 +1,77 @@
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ include "posthog.fullname" . }}-web-bc
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  securityPolicy:
+    name: {{ .Values.cloudArmorPolicy | quote }}
+  # GKE Ingress (NodePort Service): omit `port` so the LB controller derives
+  # the NodePort automatically. Specifying container port (8000/3000) here made
+  # the L7 LB probe the VM directly on those ports and backends went UNHEALTHY.
+  healthCheck:
+    type: HTTP
+    requestPath: /_health/
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ include "posthog.fullname" . }}-capture-bc
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  securityPolicy:
+    name: {{ .Values.cloudArmorPolicy | quote }}
+  healthCheck:
+    type: HTTP
+    requestPath: /_readiness
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ include "posthog.fullname" . }}-replay-capture-bc
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  securityPolicy:
+    name: {{ .Values.cloudArmorPolicy | quote }}
+  healthCheck:
+    type: HTTP
+    requestPath: /_readiness
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "posthog.fullname" . }}
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.allow-http: "false"
+spec:
+  tls:
+    - hosts: [{{ .Values.hostname | quote }}]
+      secretName: {{ .Values.tlsSecretName | quote }}
+  rules:
+    - host: {{ .Values.hostname | quote }}
+      http:
+        paths:
+          # Ingestion paths -> capture service (selfhog #9)
+          - { path: /e,       pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-capture, port: { number: 3000 } } } }
+          - { path: /batch,   pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-capture, port: { number: 3000 } } } }
+          - { path: /capture, pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-capture, port: { number: 3000 } } } }
+          - { path: /track,   pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-capture, port: { number: 3000 } } } }
+          - { path: /engage,  pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-capture, port: { number: 3000 } } } }
+          - { path: /i,       pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-capture, port: { number: 3000 } } } }
+          # Session recording snapshots -> replay-capture (separate Rust service from events capture)
+          - { path: /s,       pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-replay-capture, port: { number: 3000 } } } }
+          # Browser SDK remote config: /array/<token>/config.js -> hypercache-server (per docker-compose.base.yml Caddy routes)
+          - { path: /array,   pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-hypercache-server, port: { number: 3002 } } } }
+          # Browser SDK remote config (surveys): /surveys, /api/surveys -> hypercache-server
+          - { path: /surveys, pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-hypercache-server, port: { number: 3002 } } } }
+          # Feature flags: /flags, /flags/* -> feature-flags Rust service (deployed via templates/feature-flags.yaml)
+          - { path: /flags,   pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-feature-flags, port: { number: 3001 } } } }
+          # Catch-all -> web (must come last; longest-prefix match wins in GCE ingress)
+          - { path: /,        pathType: Prefix, backend: { service: { name: {{ include "posthog.fullname" . }}-web,     port: { number: 8000 } } } }

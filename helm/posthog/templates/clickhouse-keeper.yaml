@@ -1,0 +1,37 @@
+apiVersion: "clickhouse-keeper.altinity.com/v1"
+kind: "ClickHouseKeeperInstallation"
+metadata:
+  name: {{ include "posthog.fullname" . }}-clickhouse-keeper
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  configuration:
+    clusters:
+      - name: "keeper"
+        layout:
+          replicasCount: 1
+    settings:
+      logger/level: "information"
+      logger/console: "true"
+  defaults:
+    templates:
+      podTemplate: keeper-pod
+      dataVolumeClaimTemplate: keeper-data-volume
+  templates:
+    podTemplates:
+      - name: keeper-pod
+        spec:
+          containers:
+            - name: clickhouse-keeper
+              image: "clickhouse/clickhouse-keeper:24.3"
+              resources:
+                requests: { cpu: "100m", memory: "256Mi" }
+                limits:   { cpu: "500m", memory: "1Gi" }
+    volumeClaimTemplates:
+      - name: keeper-data-volume
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: {{ .Values.clickhouse.storageClass | quote }}
+          resources:
+            requests:
+              storage: "5Gi"

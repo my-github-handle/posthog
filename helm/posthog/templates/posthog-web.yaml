@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "posthog.fullname" . }}-web
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+  annotations:
+    cloud.google.com/backend-config: '{"default": "{{ include "posthog.fullname" . }}-web-bc"}'
+spec:
+  type: NodePort
+  selector: { app: {{ include "posthog.fullname" . }}-web }
+  ports:
+    - { name: http, port: 8000, targetPort: 8000 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "posthog.fullname" . }}-web
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector: { matchLabels: { app: {{ include "posthog.fullname" . }}-web } }
+  template:
+    metadata:
+      labels: { app: {{ include "posthog.fullname" . }}-web }
+      annotations:
+        checksum/app-secret: {{ include (print $.Template.BasePath "/app-secret.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: web
+          image: {{ .Values.posthog.webImage | quote }}
+          command: ["bash", "-c", "./bin/docker-server"]
+          envFrom:
+            - secretRef: { name: {{ include "posthog.fullname" . }}-app-secrets }
+            - secretRef: { name: {{ .Values.gcs.hmacSecretName }} }
+          env:
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-username } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-password } }
+            - name: POSTGRES_HOST
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-endpoint } }
+            - name: POSTGRES_PORT
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-port } }
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+            - name: PERSONS_DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+            # --- hobby.yml env (from docker-compose.hobby.yml / docker-compose.base.yml) ---
+            - { name: DEPLOYMENT,              value: "hobby" }
+            - { name: PERSONHOG_ADDR,          value: {{ printf "http://%s-personhog-router:50052" (include "posthog.fullname" .) | quote }} }
+            - { name: PERSONHOG_ENABLED,       value: "true" }
+            - { name: PERSONHOG_ROLLOUT_PERCENTAGE, value: "100" }
+            - { name: RECORDING_API_URL,       value: {{ printf "http://%s-recording-api:6738" (include "posthog.fullname" .) | quote }} }
+            - { name: CDP_API_URL,             value: {{ printf "http://%s-recording-api:6738" (include "posthog.fullname" .) | quote }} }
+            - { name: OTEL_SERVICE_NAME,       value: "posthog" }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "" }
+            - { name: OTEL_SDK_DISABLED,       value: "true" }
+            - { name: OPT_OUT_CAPTURE,         value: "false" }
+            - { name: API_QUERIES_PER_TEAM,    value: '{"1": 100}' }
+            - { name: FLAGS_REDIS_ENABLED,     value: "false" }
+            # --- S3-compat session recording: keys come via envFrom posthog-gcs-hmac ---
+            - name: SESSION_RECORDING_V2_S3_ENDPOINT
+              valueFrom: { secretKeyRef: { name: {{ include "posthog.fullname" . }}-app-secrets, key: OBJECT_STORAGE_ENDPOINT } }
+            - { name: OBJECT_STORAGE_ENABLED,  value: "true" }
+            - { name: OBJECT_STORAGE_PUBLIC_ENDPOINT, value: {{ printf "https://%s" .Values.hostname | quote }} }
+            - { name: SESSION_RECORDING_V2_S3_FORCE_PATH_STYLE, value: "true" }
+            - { name: SESSION_RECORDING_V2_S3_BUCKET,           value: {{ .Values.gcs.bucket | quote }} }
+            - { name: SESSION_RECORDING_V2_S3_PREFIX,           value: {{ .Values.gcs.sessionRecordingFolder | quote }} }
+          ports: [{ containerPort: 8000 }]
+          resources:
+            requests: { cpu: {{ .Values.web.resources.requests.cpu | quote }}, memory: {{ .Values.web.resources.requests.memory | quote }} }
+            # No limits: web pod runs a Python worker pool whose working set is hard to cap;
+            # hitting memory limit triggers OOMKill, and CPU limit throttles gunicorn workers.
+            # Request-only lets the scheduler reserve capacity without hard ceilings.
+          # Readiness still hits /_health/ (which checks DB/Redis/CH/Kafka) so
+          # the pod gates traffic on real dependencies; raised failureThreshold
+          # so transient 503s don't remove the pod from the Service.
+          readinessProbe:
+            httpGet: { path: /_health/, port: 8000 }
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 60
+          # Liveness intentionally only checks "is Django listening?" — a cheap
+          # TCP probe. /_health/ can return 503 for long stretches when Celery
+          # or Kafka heartbeats lag (track #61); that shouldn't restart the pod,
+          # only take it out of the Service. Readiness handles that separately.
+          livenessProbe:
+            tcpSocket: { port: 8000 }
+            initialDelaySeconds: 600
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6

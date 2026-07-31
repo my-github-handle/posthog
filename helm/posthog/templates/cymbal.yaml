@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "posthog.fullname" . }}-cymbal
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: { app: {{ include "posthog.fullname" . }}-cymbal }
+  ports:
+    - { name: http, port: 3302, targetPort: 3302 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "posthog.fullname" . }}-cymbal
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.cymbal.replicas }}
+  selector: { matchLabels: { app: {{ include "posthog.fullname" . }}-cymbal } }
+  template:
+    metadata:
+      labels: { app: {{ include "posthog.fullname" . }}-cymbal }
+      annotations:
+        checksum/app-secret: {{ include (print $.Template.BasePath "/app-secret.yaml") . | sha256sum }}
+    spec:
+      {{- if .Values.maxmindDb.enabled }}
+      initContainers:
+        - name: maxmind-download
+          image: curlimages/curl:8.8.0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Downloading MaxMind GeoLite2-City.mmdb..."
+              curl -sL "{{ .Values.maxmindDb.downloadUrl }}" -o /share/GeoLite2-City.mmdb
+              ls -la /share/GeoLite2-City.mmdb
+          volumeMounts:
+            - { name: share, mountPath: /share }
+      {{- end }}
+      containers:
+        - name: cymbal
+          image: {{ .Values.images.cymbal | quote }}
+          envFrom:
+            - secretRef: { name: {{ .Values.gcs.hmacSecretName }} }
+          env:
+            - name: KAFKA_HOSTS
+              value: {{ .Values.kafka.hosts | quote }}
+            - name: OBJECT_STORAGE_BUCKET
+              value: {{ .Values.gcs.bucket | quote }}
+            - name: OBJECT_STORAGE_ENDPOINT
+              value: {{ .Values.gcs.endpoint | quote }}
+            - name: OBJECT_STORAGE_FORCE_PATH_STYLE
+              value: "true"
+            - name: BIND_HOST
+              value: "0.0.0.0"
+            - name: BIND_PORT
+              value: "3302"
+            - name: MAXMIND_DB_PATH
+              value: "/share/GeoLite2-City.mmdb"
+            - name: REDIS_URL
+              value: {{ printf "redis://%s-redis:6379/" (include "posthog.fullname" .) | quote }}
+            - name: ISSUE_BUCKETS_REDIS_URL
+              value: {{ printf "redis://%s-redis:6379/" (include "posthog.fullname" .) | quote }}
+            - name: RUST_LOG
+              value: "info"
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-username } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-password } }
+            - name: POSTGRES_HOST
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-endpoint } }
+            - name: POSTGRES_PORT
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-port } }
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+            - name: PERSONS_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+          {{- if .Values.maxmindDb.enabled }}
+          volumeMounts:
+            - { name: share, mountPath: /share }
+          {{- end }}
+          ports: [{ containerPort: 3302 }]
+          resources:
+            requests:
+              cpu:    {{ (index .Values.defaultResources .Values.cymbal.resourcesTier).requests.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.cymbal.resourcesTier).requests.memory | quote }}
+            limits:
+              cpu:    {{ (index .Values.defaultResources .Values.cymbal.resourcesTier).limits.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.cymbal.resourcesTier).limits.memory | quote }}
+      {{- if .Values.maxmindDb.enabled }}
+      volumes:
+        - { name: share, emptyDir: {} }
+      {{- end }}

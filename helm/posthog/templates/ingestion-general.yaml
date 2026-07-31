@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "posthog.fullname" . }}-ingestion-general
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: { app: {{ include "posthog.fullname" . }}-ingestion-general }
+  ports:
+    - { name: http, port: 6738, targetPort: 6738 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "posthog.fullname" . }}-ingestion-general
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ingestionGeneral.replicas }}
+  selector: { matchLabels: { app: {{ include "posthog.fullname" . }}-ingestion-general } }
+  template:
+    metadata:
+      labels: { app: {{ include "posthog.fullname" . }}-ingestion-general }
+      annotations:
+        checksum/app-secret: {{ include (print $.Template.BasePath "/app-secret.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: ingestion-general
+          image: {{ .Values.images.pluginServerNode | quote }}
+          command: ["node", "nodejs/dist/index.js"]
+          envFrom:
+            - secretRef: { name: {{ include "posthog.fullname" . }}-app-secrets }
+          env:
+            # Kafka override (librdkafka env-reading workaround — see posthog-worker.yaml)
+            - { name: KAFKA_HOSTS,       value: {{ .Values.kafka.hosts | quote }} }
+            - { name: KAFKA_BROKER_LIST, value: {{ .Values.kafka.hosts | quote }} }
+            - { name: KAFKA_PRODUCER_METADATA_BROKER_LIST, value: {{ .Values.kafka.hosts | quote }} }
+            - { name: KAFKA_CONSUMER_METADATA_BROKER_LIST, value: {{ .Values.kafka.hosts | quote }} }
+            # Existing Confluent CP Kafka in c3-opsadmin does not bundle snappy native libs
+            # (FIPS JDK blocks org.xerial.snappy load), so broker rejects snappy-compressed
+            # produces with "unknown broker error". Force all librdkafka producers to none.
+            - { name: KAFKA_PRODUCER_COMPRESSION_CODEC,              value: "none" }
+            - { name: KAFKA_METRICS_PRODUCER_COMPRESSION_CODEC,      value: "none" }
+            - { name: KAFKA_MSK_PRODUCER_COMPRESSION_CODEC,          value: "none" }
+            - { name: KAFKA_WAREHOUSE_PRODUCER_COMPRESSION_CODEC,    value: "none" }
+            - { name: KAFKA_CDP_PRODUCER_COMPRESSION_CODEC,          value: "none" }
+            - { name: KAFKA_WARPSTREAM_PRODUCER_COMPRESSION_CODEC,   value: "none" }
+            - { name: KAFKA_WARPSTREAM_LOGS_PRODUCER_COMPRESSION_CODEC,      value: "none" }
+            - { name: KAFKA_WARPSTREAM_INGESTION_PRODUCER_COMPRESSION_CODEC, value: "none" }
+            # Postgres env block (shared pattern from posthog-web.yaml)
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-username } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-admin-password } }
+            - name: POSTGRES_HOST
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-endpoint } }
+            - name: POSTGRES_PORT
+              valueFrom: { secretKeyRef: { name: {{ .Values.postgres.adminSecretName | quote }}, key: postgres-db-port } }
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+            - name: PERSONS_DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/{{ .Values.postgres.database }}"
+            # Mode-specific env
+            - { name: PLUGIN_SERVER_MODE,    value: "ingestion-v2-combined" }
+            - { name: COOKIELESS_REDIS_HOST, value: {{ printf "%s-redis" (include "posthog.fullname" .) | quote }} }
+            - { name: COOKIELESS_REDIS_PORT, value: "6379" }
+            - { name: CDP_REDIS_HOST,        value: {{ printf "%s-redis" (include "posthog.fullname" .) | quote }} }
+          ports: [{ containerPort: 6738 }]
+          resources:
+            requests:
+              cpu:    {{ (index .Values.defaultResources .Values.ingestionGeneral.resourcesTier).requests.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.ingestionGeneral.resourcesTier).requests.memory | quote }}
+            limits:
+              cpu:    {{ (index .Values.defaultResources .Values.ingestionGeneral.resourcesTier).limits.cpu | quote }}
+              memory: {{ (index .Values.defaultResources .Values.ingestionGeneral.resourcesTier).limits.memory | quote }}
+          readinessProbe:
+            httpGet: { path: /_health, port: 6738 }
+            initialDelaySeconds: 45
+            periodSeconds: 10

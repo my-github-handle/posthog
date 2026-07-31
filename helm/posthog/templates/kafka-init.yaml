@@ -1,0 +1,78 @@
+{{- if .Values.kafkaInit.enabled -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "posthog.fullname" . }}-kafka-init
+  labels:
+    {{- include "posthog.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: rpk
+          image: {{ .Values.images.kafkaInit | quote }}
+          resources:
+            requests:
+              cpu:    {{ .Values.kafkaInit.resources.requests.cpu | quote }}
+              memory: {{ .Values.kafkaInit.resources.requests.memory | quote }}
+            limits:
+              cpu:    {{ .Values.kafkaInit.resources.limits.cpu | quote }}
+              memory: {{ .Values.kafkaInit.resources.limits.memory | quote }}
+          env:
+            - { name: KAFKA_BROKERS,   value: {{ .Values.kafka.hosts | quote }} }
+            - { name: KAFKA_PREFIX,    value: {{ .Values.kafka.topicPrefix | quote }} }
+            - { name: TIMEOUT_SECONDS, value: {{ .Values.kafkaInit.timeoutSeconds | quote }} }
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for Kafka broker at $KAFKA_BROKERS..."
+              TIMEOUT="${TIMEOUT_SECONDS:-120}"
+              ELAPSED=0
+              until rpk topic list --brokers "$KAFKA_BROKERS" > /dev/null 2>&1; do
+                echo "Kafka not ready (elapsed: ${ELAPSED}s)..."
+                sleep 3
+                ELAPSED=$((ELAPSED + 3))
+                if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+                  echo "ERROR: Kafka broker $KAFKA_BROKERS never became reachable in ${TIMEOUT}s"
+                  rpk topic list --brokers "$KAFKA_BROKERS" || true
+                  exit 1
+                fi
+              done
+              echo "Kafka is reachable. Listing existing topics:"
+              rpk topic list --brokers "$KAFKA_BROKERS"
+              echo "Creating required PostHog topics (prefix: $KAFKA_PREFIX)..."
+              {{- range .Values.kafkaTopics.createOnInstall }}
+              TOPIC="${KAFKA_PREFIX}{{ . }}"
+              if rpk topic create "$TOPIC" --brokers "$KAFKA_BROKERS" -p 1 -r 1 2>&1 | tee /tmp/create-$TOPIC.log; then
+                if grep -q "created" /tmp/create-$TOPIC.log 2>/dev/null; then
+                  echo "[OK] $TOPIC created"
+                elif grep -q -i "already exists\|TOPIC_ALREADY_EXISTS" /tmp/create-$TOPIC.log 2>/dev/null; then
+                  echo "[INFO] $TOPIC already exists (fine)"
+                else
+                  echo "[WARN] $TOPIC - create command returned 0 but output unclear:"
+                  cat /tmp/create-$TOPIC.log
+                fi
+              else
+                # rpk returns non-zero on "already exists" sometimes - check topic list
+                if rpk topic list --brokers "$KAFKA_BROKERS" | awk '{print $1}' | grep -qxF "$TOPIC"; then
+                  echo "[INFO] $TOPIC already exists (confirmed via list)"
+                else
+                  echo "[FAIL] Failed to create $TOPIC"
+                  cat /tmp/create-$TOPIC.log
+                  exit 1
+                fi
+              fi
+              {{- end }}
+              echo "Final posthog topic list:"
+              rpk topic list --brokers "$KAFKA_BROKERS" | grep "^${KAFKA_PREFIX}" || true
+              echo "kafka-init completed successfully"
+{{- end }}

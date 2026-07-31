@@ -1,0 +1,26 @@
+PostHog installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Watch pods come up (first boot takes 8-12 min):
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+Wait for Ingress to get a public IP:
+  kubectl -n {{ .Release.Namespace }} get ingress {{ include "posthog.fullname" . }} -w
+
+Once the IP appears, create DNS A record:
+  {{ .Values.hostname }} -> <LoadBalancer IP>
+
+After DNS propagates (or using --resolve for a local test):
+  curl https://{{ .Values.hostname }}/_preflight/    # all 7 services must be true
+
+Test event ingestion (selfhog posthog-health section 2) - MUST return 200:
+  curl -X POST https://{{ .Values.hostname }}/batch/ \
+    -H 'Content-Type: application/json' \
+    --data '{"api_key":"<phc_...>","batch":[{"event":"healthcheck","distinct_id":"d","properties":{}}]}'
+
+If /_preflight/ shows any service false, consult:
+  ~/.claude/skills/selfhog/posthog-health.md
+
+Uninstall:
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+  # Then clean up PVCs (helm does NOT delete PVCs from StatefulSets):
+  kubectl -n {{ .Release.Namespace }} delete pvc -l app.kubernetes.io/instance={{ .Release.Name }}

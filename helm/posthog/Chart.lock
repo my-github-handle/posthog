@@ -1,0 +1,6 @@
+dependencies:
+- name: altinity-clickhouse-operator
+  repository: https://docs.altinity.com/clickhouse-operator/
+  version: 0.24.0
+digest: sha256:6d41eb0a2e83363203115d937538693e61b28edcad49595724bb1312c9f663f6
+generated: "2026-05-02T20:03:36.627648-07:00"
